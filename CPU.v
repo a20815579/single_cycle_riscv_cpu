@@ -140,7 +140,7 @@ endmodule
 
 module ALU(
 	input is_ALU, is_sub, is_unsign,
-	input [2:0] ALUop,
+	input [2:0] ALUop, ImmType,
 	input [31:0] a, b,
 	output reg [31:0] result
 );
@@ -150,10 +150,10 @@ begin
 	if(is_ALU)
 		case(ALUop)
 			3'b000:
-				if(!is_sub)
-					result = a + b;
-				else
+				if(is_sub && ImmType == 3'b000)
 					result = a - b;
+				else
+					result = a + b;
 			3'b001:
 				result = (a == b)? 32'd1 : 32'd0;
 			3'b010:
@@ -309,9 +309,9 @@ initial
 	PC_addr = 0;
 always@(negedge clk)
 begin
-$display("%b",new_addr[31:0]);
-	if(instr_read)
+	if(instr_read) begin
 		PC_addr <= new_addr; 
+	end
 end     
 endmodule
 
@@ -536,6 +536,20 @@ module UseMem(
 assign use_memory = MemWr | MemRe;
 endmodule
 
+module StoreInstr(
+	input instr_read,
+	input [31:0] instr_in,
+	output [31:0] instr_out
+);
+reg [31:0] instr_reg;
+assign instr_out = instr_reg;
+always@(instr_in)
+begin
+	if(instr_read)
+		instr_reg = instr_in;
+end
+endmodule
+
 module CPU(
     input             clk,
     input             rst,
@@ -556,31 +570,32 @@ wire [2:0] ALUop, ImmType;
 wire [4:0] shamt_result;
 wire [31:0] rs1_data, rs2_data, second_num, JorU_PC, addr_result;
 wire [31:0] ALU_result, rd_JorU, imm_result, shift_result, rd_result;
-wire [31:0] load_final_data, instr_addr_wire;
+wire [31:0] load_final_data, instr_addr_wire, instr_wire;
 
 assign instr_read = instr_read_wire;
 assign data_read = data_read_wire;
 assign instr_addr = instr_addr_wire;
 
-ControlUnit my_ControlUnit(.opcode(instr_out[6:0]), .funct3(instr_out[14:12]),
+ControlUnit my_ControlUnit(.opcode(instr_wire[6:0]), .funct3(instr_wire[14:12]),
 .r1_able(r1_able), .r2_able(r2_able), .rd_able(rd_able), .JorU_type(JorU_type),
 .is_ALU(is_ALU), .is_shift(is_shift), .MemRe(data_read_wire), .MemWr(MemWr),
 .ALUSrc(ALUSrc), .special_type(special_type), .rdSrc(rdSrc), .PCSrc(PCSrc),
 .ALUop(ALUop), .ImmType(ImmType));
 
-ALU my_ALU(.is_ALU(is_ALU), .is_sub(instr_out[30]), .is_unsign(instr_out[12]),
-.ALUop(ALUop), .a(rs1_data), .b(second_num), .result(ALU_result));
+ALU my_ALU(.is_ALU(is_ALU), .is_sub(instr_wire[30]),
+.is_unsign(instr_wire[12]), .ALUop(ALUop), .ImmType(ImmType),
+.a(rs1_data), .b(second_num), .result(ALU_result));
 
 RegFile my_RegFile(.clk(clk), .r1_able(r1_able), .r2_able(r2_able), 
-.rd_able(rd_able), .rs1_addr(instr_out[19:15]), .rs2_addr(instr_out[24:20]), 
-.rd_addr(instr_out[11:7]), .rd_data(rd_result), 
+.rd_able(rd_able), .rs1_addr(instr_wire[19:15]), .rs2_addr(instr_wire[24:20]), 
+.rd_addr(instr_wire[11:7]), .rd_data(rd_result), 
 .rs1_data(rs1_data), .rs2_data(rs2_data));
 
-DealImme my_DealImme(.ImmType(ImmType), .first25(instr_out[31:7]),	
+DealImme my_DealImme(.ImmType(ImmType), .first25(instr_wire[31:7]),	
 .result(imm_result));
 
-Shift my_Shift(.is_shift(is_shift), .unsign(instr_out[30]), 
-.right(instr_out[14]), .shamt(shamt_result), .origin(rs1_data),	
+Shift my_Shift(.is_shift(is_shift), .unsign(instr_wire[30]), 
+.right(instr_wire[14]), .shamt(shamt_result), .origin(rs1_data),	
 .result(shift_result));
 
 PC my_PC(.clk(clk), .instr_read(instr_read_wire), .new_addr(addr_result),
@@ -594,8 +609,8 @@ DealJorU my_DealJorU( .JorU_type(JorU_type), .type(special_type),
 .old_PC(instr_addr_wire), .imm(imm_result), .rs1(rs1_data),
 .rd(rd_JorU), .new_PC(JorU_PC));
 
-ShamtMux my_ShamtMux(.is_shift(is_shift), .shift_src(instr_out[5]),
-.from_rs2(rs2_data[4:0]), .from_imm(instr_out[24:20]), .shamt(shamt_result));
+ShamtMux my_ShamtMux(.is_shift(is_shift), .shift_src(instr_wire[5]),
+.from_rs2(rs2_data[4:0]), .from_imm(instr_wire[24:20]), .shamt(shamt_result));
 
 rdMux my_rdMux(.rd_able(rd_able), .rdSrc(rdSrc), .from_ALU(ALU_result), 
 .from_shift(shift_result), .from_JorU(rd_JorU), .from_memory(load_final_data),	
@@ -604,11 +619,14 @@ rdMux my_rdMux(.rd_able(rd_able), .rdSrc(rdSrc), .from_ALU(ALU_result),
 ALUMux my_ALUMux(.is_ALU(is_ALU), .ALUSrc(ALUSrc), .imm(imm_result),
 .rs2(rs2_data), .second_num(second_num));
 
-DealLoad my_DealLoad(.MemRe(data_read_wire), .funct3(instr_out[14:12]),
+DealLoad my_DealLoad(.MemRe(data_read_wire), .funct3(instr_wire[14:12]),
 .load_data(data_out), .out_data(load_final_data));
 
-DealStore my_DealStore(.MemWr(MemWr), .funct3_last2(instr_out[13:12]),
+DealStore my_DealStore(.MemWr(MemWr), .funct3_last2(instr_wire[13:12]),
 .addr_last2(ALU_result[1:0]), .write4(data_write));
+
+StoreInstr my_StoreInstr( .instr_read(instr_read_wire), .instr_in(instr_out), 
+.instr_out(instr_wire));
 
 DealInstrRead my_DealInstrRead(clk, use_memory,	instr_read_wire);
 DataAddr my_DataAddr(use_memory, ALU_result, data_addr);
