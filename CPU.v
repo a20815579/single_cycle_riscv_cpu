@@ -139,7 +139,7 @@ end
 endmodule
 
 module ALU(
-	input is_ALU, is_sub, is_unsign,
+	input is_ALU, is_sub, is_branch, unsign_sl, unsign_branch,
 	input [2:0] ALUop, ImmType,
 	input [31:0] a, b,
 	output reg [31:0] result
@@ -159,15 +159,21 @@ begin
 			3'b010:
 				result = (a != b)? 32'd1 : 32'd0;
 			3'b011:
-				if(is_unsign)
-					result = (a < b)? 32'd1 : 32'd0;
+				if(is_branch)
+					if(unsign_branch)
+						result = ($unsigned(a) < $unsigned(b))? 32'd1 : 32'd0;
+					else
+						result = ($signed(a) < $signed(b))? 32'd1 : 32'd0;
 				else
-					result = ($signed(a) < $signed(b))? 32'd1 : 32'd0;
+					if(unsign_sl)
+						result = ($unsigned(a) < $unsigned(b))? 32'd1 : 32'd0;
+					else
+						result = ($signed(a) < $signed(b))? 32'd1 : 32'd0;
 			3'b100:			
 				result = a ^ b;
 			3'b101:
-				if(is_unsign)
-					result = (a >= b)? 32'd1 : 32'd0;
+				if(unsign_branch)
+					result = ($unsigned(a) >= $unsigned(b))? 32'd1 : 32'd0;
 				else
 					result = ($signed(a) >= $signed(b))? 32'd1 : 32'd0;
 			3'b110:
@@ -181,7 +187,7 @@ end
 endmodule
 
 module RegFile(
-	input clk, r1_able, r2_able, rd_able,
+	input clk, r1_able, r2_able, rd_able, data_read, MemRe,
 	input [4:0] rs1_addr, rs2_addr, rd_addr,
 	input [31:0] rd_data,
 	output [31:0]  rs1_data, rs2_data
@@ -198,8 +204,10 @@ assign rs1_data = r1_able? register[rs1_addr] : 0;
 assign rs2_data = r2_able? register[rs2_addr] : 0;
 
 always@(negedge clk)
-begin 
-	if(rd_able)
+begin
+	if(MemRe && data_read && rd_addr)
+		register[rd_addr] <= rd_data;
+	else if(~MemRe & rd_able && rd_addr)
 		register[rd_addr] <= rd_data;
 end
 endmodule
@@ -281,7 +289,7 @@ end
 endmodule
 
 module Shift(
-	input is_shift, unsign, right,
+	input is_shift, sign, right,
 	input [4:0] shamt,
 	input [31:0] origin,	
 	output reg [31:0] result
@@ -289,12 +297,12 @@ module Shift(
 always@(*)
 begin
 	if(is_shift)
-		 if(!right)
-			  result = origin << shamt;
-		 else if(unsign)
-			  result = origin >> shamt;
-		 else                    
-			  result = $signed(origin) >>> shamt;
+		if(!right)
+			result = origin << shamt;
+		else if(sign)
+			result = $signed(origin) >>> shamt;		  
+		else                    
+			result = origin >> shamt;
 	else
 		result = 0;
 end
@@ -451,9 +459,9 @@ begin
 					out_data = {16'b1111111111111111,load_data[15:0]};
 				else
 					out_data = {16'b0000000000000000,load_data[15:0]};
-			3'b101: //bu
+			3'b100: //bu
 				out_data = {24'b000000000000000000000000,load_data[7:0]};
-			3'b101: //hu
+			default: //hu
 				out_data = {16'b0000000000000000,load_data[15:0]};
 		endcase
 	else
@@ -464,16 +472,22 @@ endmodule
 module DealStore(
 	input MemWr,
 	input [1:0] funct3_last2, addr_last2,
-	output reg [3:0] write4
+	input [31:0] rs2_data,
+	output reg [3:0] write4,
+	output reg [31:0] data_in
 );
+wire [4:0] shamt;
+assign shamt = addr_last2 << 3;
+
 initial
 	write4 = 0;
+	
 always@(*)
 begin
 	if(MemWr)
 		case(funct3_last2)
 			2'b00:
-				case(funct3_last2)
+				case(addr_last2)
 					2'b00:
 						write4 = 4'b0001;
 					2'b01:
@@ -484,7 +498,7 @@ begin
 						write4 = 4'b1000;
 				endcase
 			2'b01:
-				case(funct3_last2)
+				case(addr_last2)
 					2'b00:
 						write4 = 4'b0011;
 					2'b01:
@@ -498,6 +512,15 @@ begin
 	else
 		write4 = 4'b0000;		
 end
+
+always@(*)
+begin
+	if(MemWr)
+		data_in = rs2_data << shamt;
+	else
+		data_in = 0;
+end
+
 endmodule
 
 module DealInstrRead(
@@ -513,20 +536,25 @@ begin
 end
 endmodule
 
+module DealDataRead(
+	input clk, MemRe,
+	output reg data_read
+);
+always@(negedge clk)
+begin
+	if(MemRe)
+		data_read <= ~data_read;
+	else
+		data_read <= 0;
+end
+endmodule
+
 module DataAddr(
 	input use_memory,
 	input [31:0] ALU_result,
 	output [31:0] data_addr
 );
 assign data_addr = use_memory ? ALU_result : 0;
-endmodule
-
-module DataIn(
-	input MemWr,
-	input [31:0] rs2_data,
-	output [31:0] data_in
-);
-assign data_in = MemWr ? rs2_data : 0;
 endmodule
 
 module UseMem(
@@ -543,6 +571,7 @@ module StoreInstr(
 );
 reg [31:0] instr_reg;
 assign instr_out = instr_reg;
+
 always@(instr_in)
 begin
 	if(instr_read)
@@ -564,7 +593,7 @@ module CPU(
 );
 
 wire r1_able, r2_able, rd_able, JorU_type, is_ALU, is_shift, MemWr;
-wire ALUSrc, use_memory, data_read_wire, instr_read_wire;
+wire ALUSrc, use_memory, data_read_wire, instr_read_wire, MemRe;
 wire [1:0] special_type, rdSrc, PCSrc;
 wire [2:0] ALUop, ImmType;
 wire [4:0] shamt_result;
@@ -576,25 +605,25 @@ assign instr_read = instr_read_wire;
 assign data_read = data_read_wire;
 assign instr_addr = instr_addr_wire;
 
-ControlUnit my_ControlUnit(.opcode(instr_wire[6:0]), .funct3(instr_wire[14:12]),
+ControlUnit my_ControlUnit(.opcode(instr_wire[6:0]),.funct3(instr_wire[14:12]),
 .r1_able(r1_able), .r2_able(r2_able), .rd_able(rd_able), .JorU_type(JorU_type),
-.is_ALU(is_ALU), .is_shift(is_shift), .MemRe(data_read_wire), .MemWr(MemWr),
+.is_ALU(is_ALU), .is_shift(is_shift), .MemRe(MemRe), .MemWr(MemWr),
 .ALUSrc(ALUSrc), .special_type(special_type), .rdSrc(rdSrc), .PCSrc(PCSrc),
 .ALUop(ALUop), .ImmType(ImmType));
 
-ALU my_ALU(.is_ALU(is_ALU), .is_sub(instr_wire[30]),
-.is_unsign(instr_wire[12]), .ALUop(ALUop), .ImmType(ImmType),
-.a(rs1_data), .b(second_num), .result(ALU_result));
+ALU my_ALU(.is_ALU(is_ALU), .is_sub(instr_wire[30]), .is_branch(instr_wire[6]),
+.unsign_sl(instr_wire[12]), .unsign_branch(instr_wire[13]), .ALUop(ALUop),
+.ImmType(ImmType), .a(rs1_data), .b(second_num), .result(ALU_result));
 
 RegFile my_RegFile(.clk(clk), .r1_able(r1_able), .r2_able(r2_able), 
 .rd_able(rd_able), .rs1_addr(instr_wire[19:15]), .rs2_addr(instr_wire[24:20]), 
-.rd_addr(instr_wire[11:7]), .rd_data(rd_result), 
-.rs1_data(rs1_data), .rs2_data(rs2_data));
+.rd_addr(instr_wire[11:7]), .rd_data(rd_result), .MemRe(MemRe),
+.rs1_data(rs1_data), .rs2_data(rs2_data), .data_read(data_read_wire));
 
 DealImme my_DealImme(.ImmType(ImmType), .first25(instr_wire[31:7]),	
 .result(imm_result));
 
-Shift my_Shift(.is_shift(is_shift), .unsign(instr_wire[30]), 
+Shift my_Shift(.is_shift(is_shift), .sign(instr_wire[30]), 
 .right(instr_wire[14]), .shamt(shamt_result), .origin(rs1_data),	
 .result(shift_result));
 
@@ -619,18 +648,19 @@ rdMux my_rdMux(.rd_able(rd_able), .rdSrc(rdSrc), .from_ALU(ALU_result),
 ALUMux my_ALUMux(.is_ALU(is_ALU), .ALUSrc(ALUSrc), .imm(imm_result),
 .rs2(rs2_data), .second_num(second_num));
 
-DealLoad my_DealLoad(.MemRe(data_read_wire), .funct3(instr_wire[14:12]),
+DealLoad my_DealLoad(.MemRe(MemRe), .funct3(instr_wire[14:12]),
 .load_data(data_out), .out_data(load_final_data));
 
 DealStore my_DealStore(.MemWr(MemWr), .funct3_last2(instr_wire[13:12]),
-.addr_last2(ALU_result[1:0]), .write4(data_write));
+.addr_last2(ALU_result[1:0]), .rs2_data(rs2_data), .write4(data_write),
+.data_in(data_in));
 
 StoreInstr my_StoreInstr( .instr_read(instr_read_wire), .instr_in(instr_out), 
 .instr_out(instr_wire));
 
+DealDataRead my_DealDataRead(clk, MemRe, data_read_wire);
 DealInstrRead my_DealInstrRead(clk, use_memory,	instr_read_wire);
 DataAddr my_DataAddr(use_memory, ALU_result, data_addr);
-DataIn my_DataIn(MemWr, rs2_data, data_in);
-UseMem my_UseMem(MemWr, data_read_wire, use_memory);
+UseMem my_UseMem(MemWr, MemRe, use_memory);
 
 endmodule
