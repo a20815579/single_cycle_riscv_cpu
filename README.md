@@ -1,1 +1,1 @@
-# computer_organization
+# RISC_V single cycle CPU
