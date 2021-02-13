@@ -1,1 +1,1 @@
-# RISC_V single cycle CPU
+# single_cycle_risv_cpu
